@@ -1,0 +1,215 @@
+#!/bin/bash			
+###############################################
+#  
+#  swatch v0.0.1	
+#  10/23/15			
+#  written by Alexandre Marand	
+#  use at your own risk
+#			
+###############################################
+
+set -e
+
+##start optional arguments usage
+##---------------------------------------------
+
+usage()
+{
+cat << EOF
+
+*************************************************************************************************
+*    Sliding Window Approach To Clustering Haplotypes        (v0.0.1)        10/23/15           *    
+************************************************************************************************* 
+
+usage: swatch <options>
+
+OPTIONS:
+	
+	-v <file>	VCF file [Required]
+	-w <int>	Window size [Default = 10]
+	-i <int>	Increase size [Default = 1]
+	-r <int>	Step ratio. Calculated as Window Size divided by <int> [Default = 2]
+	-c <int> 	Number of allowable recombinations per individual [Default = 1]
+	-n <flag>	Disable step ratio, if '-n' is set, actual step is current window size. 
+			This results in non-overlapping windows, and reduces computation time. 
+	-o <string>	Prefix to output [Default = "out"]
+
+EOF
+}
+
+##Default arguments set below, in case option
+##---------------------------------------------
+
+V=
+W=10
+I=1
+R=2
+C=1
+N="no"
+O="out"
+while getopts ":v:w:i:r:c:no" OPTION
+do
+	case $OPTION in
+		v)
+			V=$OPTARG
+			;;
+		w)
+			if [[ $OPTARG =~ ^[0-9]+$ ]]; then
+				W=$OPTARG
+			else
+				W=10
+			fi
+			;;
+		i)
+			if [[ $OPTARG =~ ^[0-9]+$ ]]; then
+				I=$OPTARG
+			else
+				I=1
+			fi
+			;;
+		r)
+			if [[ $OPTARG =~ ^[0-9]+$ ]]; then
+				R=$OPTARG
+			else
+				R=2
+			fi
+			;;
+		c)
+			if [[ $OPTARG =~ ^[0-9]+$ ]]; then
+				C=$OPTARG
+			else
+				C=1
+			fi
+			;;
+		n)	
+			N="yes"
+			;;
+		o)
+			O=$OPTARG
+			;;
+		\?)
+			echo "Invalid Flag set -$OPTARG" >&2
+			;;
+		:)
+			echo "Option -$OPTARG requires an argument" >&2
+			exit 1
+			;;
+	esac
+done
+
+##Check to see if the arguments are fullfilled or not
+##---------------------------------------------
+
+if [[ -z $V ]] || [[ -z $W ]] || [[ -z $I ]] || [[ -z $R ]] || [[ -z $C ]]
+	then
+		usage
+		exit 1
+fi 
+
+##Clean up the current direction for any files left over from a previous run
+##----------------------------------------------
+
+shopt -s nullglob
+files=( *.col.txt )
+if (( ${#files[@]} ));
+	then
+                rm *.col.txt
+		echo 1>&2 "Quickly cleaning up the current directory..."
+		echo 1>&2 ""
+fi
+timestamp() {
+	date +"%T"
+}
+
+##Specify what the set parameters are to the user
+##---------------------------------------------
+
+echo 1>&2 "Parameters"
+echo 1>&2 "----------"
+echo 1>&2 "VCF file: 			$V"
+echo 1>&2 "Window Size: 			$W markers"
+echo 1>&2 "Grow Size: 			$I"
+echo 1>&2 "Window to Step Ratio:           $R"
+echo 1>&2 "Recombination Threshold: 	$C"
+echo 1>&2 "Dynamic Window:		        $N"
+echo 1>&2 ""
+
+##Reading vcf and converting to loc
+##---------------------------------------------
+
+input=$V
+echo 1>&2 "Time: $(timestamp)-----Reading VCF file, \"$V\", and converting to Joinmap 4.1 loc format..."
+#output=${input::-4}".loc"
+vcf2joinmap.pl $V > output
+tail -n +6 output > tmp.1
+rm output
+SNPS=$(less tmp.1 | wc -l)
+
+##parsing loc file and adding an extra column with the name of the scaffold
+##---------------------------------------------
+
+echo 1>&2 "Time: $(timestamp)-----Finished reading VCF file, \"$V\", now parsing loc file..."
+echo 1>&2 "Time: $(timestamp)-----Number of markers detected: $SNPS"
+splitcols.pl tmp.1 > tmp.2
+rm tmp.1
+
+##break up loc file into individual scaffolds
+##while cleaning up at the same time
+##---------------------------------------------
+
+awk -F '\t' '{print > $1".txt"}' tmp.2 
+rm tmp.2
+delete_col.sh
+make_tab.sh
+mkdir dir_temp
+mv scaffold_*.txt dir_temp
+cd dir_temp
+mv *.col.txt ../
+cd ../
+rm -rf dir_temp
+mkdir -p  results || exit 1
+echo 1>&2 "Time: $(timestamp)-----Removing scaffolds with insufficient marker coverage and adding to file \"Scaffolds_insufficient_markers.txt\"..."
+remove_uninformative_scaffolds_first_round.pl $PWD $W
+remove=$(less Scaffolds_insufficient_markers.txt | wc -l)
+echo 1>&2 "Time: $(timestamp)-----Number of scaffolds removed: $remove"
+echo 1>&2 ""
+echo 1>&2 "********************************************************************************************"
+
+##start haplotype clustering
+##---------------------------------------------
+
+echo 1>&2 "Time: $(timestamp)-----Clustering haplotypes..."
+echo 1>&2 ""
+for i in $(ls *.col.txt | rev | cut -c 23- | rev | uniq)
+do
+	echo 1>&2 "Time: $(timestamp)-----${i}"
+	Maximum_Recombination_Parsimony.pl ${i}.txt.fixed.txt.col.txt $W $I $R $C $N > ./results/${i}.hcf
+done
+
+##merge all scaffolds into a single file
+##safe the names of scaffolds that are too small
+##to merge into 'Delete_scaffolds.txt'
+##---------------------------------------------
+
+rm *.txt.fixed.txt.col.txt
+cd results
+echo 1>&2 "Time: $(timestamp)-----Removing uniformative scaffolds"
+remove_uninformative_scaffolds.pl $PWD
+echo 1>&2 "Time: $(timestamp)-----Concatenating remaining bins"
+concatentate_good_bins.pl $PWD > merged.bins
+echo 1>&2 "Time: $(timestamp)-----Standardizing genotypes"
+standardize_genotypes.pl merged.bins > OUT.bins
+rm merged.bins 
+mv OUT.bins ../
+cd ../
+rm *.txt
+
+##convert back to joinmap loc file
+##---------------------------------------------
+
+convert_to_joinmap.pl OUT.bins > $O".loc"
+rm OUT.bins
+echo 1>&2 "Time: $(timestamp)-----Finished Processing Haplotypes"
+
+##End of Script
+##---------------------------------------------
